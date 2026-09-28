@@ -122,6 +122,15 @@ export interface SendTurnInput {
    * resume cursor (it carries an update from outside the session). A driver
    * that rebuilds only some lost sessions may also rebuild this one. */
   recoveryIsReplay?: boolean;
+  /** Antigravity-only hint for whether this turn should keep the ACP session.
+   * Other drivers ignore it. */
+  antigravityAffinity?: {
+    telegram?: boolean;
+    botReply?: boolean;
+    gapMs?: number | null;
+    inputTokens?: number;
+    forceNew?: boolean;
+  };
   /** Prior turns for transcript-replay providers (API-backed drivers). */
   transcript?: Array<{ role: "user" | "assistant"; text: string }>;
   /** Bot persona (name/title/description) as a system prompt. */

@@ -254,6 +254,7 @@ import {
 } from "./store.ts";
 import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
+import { antigravityAffinityForDispatch, noteTelegramThread } from "./drivers/antigravity-session.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { extractTurnImages } from "./turn-images.ts";
@@ -6628,6 +6629,22 @@ async function startTurn(
         // the active task's own session — another task's cursor would
         // resume the wrong conversation and defeat the context bubble
         resumeCursor: dispatchContext.resumeCursor,
+        ...(instance.driverKind === "antigravityAgent" ? {
+          antigravityAffinity: antigravityAffinityForDispatch({
+            threadId,
+            userText: String(userMessage.text ?? ""),
+            messages: activeMessages,
+            userMessageId: userMessage.id,
+            userMessageAt: userMessage.at,
+            commsDepth,
+            peerAsk: Boolean(opts?.peerAsk) || Boolean(userMessage.peerAsk),
+            fromBot: Boolean(userMessage.from),
+            coordination: Boolean(opts?.coordination),
+            cardContinuation: Boolean(opts?.cardContinuation),
+            contextTokens: Number(task.usage?.context?.tokens) || 0,
+            lastTurnInput: Number(task.usage?.lastTurn?.input) || 0,
+          }),
+        } : {}),
         ...(dispatchContext.recoveryText !== undefined ? { recoveryText: dispatchContext.recoveryText } : {}),
         ...(dispatchContext.recoveryIsReplay ? { recoveryIsReplay: true } : {}),
         transcript,
@@ -15313,6 +15330,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // receipt after a task switch, while a genuinely new send still has to
       // target the task that is active now.
       const threadId = body.threadId ?? bot.threadId;
+      if (body.origin === "telegram") noteTelegramThread(threadId);
       noteTurnTrigger(threadId, auth);
       // The send is acknowledged before the turn starts, so a workspace at its
       // spend limit is refused here, where the person can see it.
