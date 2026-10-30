@@ -36,7 +36,7 @@ import { approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdic
 import { updateClaudeCli } from "./claude-update.ts";
 import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
 import { createAntigravityAccountSchema, newAntigravityAccount } from "./antigravity-accounts.ts";
-import { antigravityAccountBlocked, antigravityAccountLoggedIn, antigravitySiblingKeepsModel, assignAntigravityAccount, noteAntigravityAssignment, noteAntigravityQuota, pickAntigravityAccount } from "./antigravity-pool.ts";
+import { antigravityAccountBlocked, antigravityAccountLoggedIn, antigravityReplyNotice, antigravityReplySwitchExclude, antigravitySiblingKeepsModel, assignAntigravityAccount, clearAntigravityReplySwitch, noteAntigravityAssignment, noteAntigravityQuotaFromText, noteAntigravityReplySwitch, pickAntigravityAccount } from "./antigravity-pool.ts";
 import { providerIconPatchSchema, withInstanceIcon } from "./provider-icon.ts";
 import { providerIconError } from "../shared/provider-icon.ts";
 import {
@@ -3577,6 +3577,7 @@ bus.subscribe((event: RuntimeEvent) => {
     runningTurnEngines.delete(event.threadId);
     endMemoryTurn(event.threadId);
   }
+  if (event.type === "turn.completed") clearAntigravityReplySwitch(event.threadId);
 });
 
 // One line per finished turn in the bot's daily log (server/recent-work.ts):
@@ -3953,6 +3954,71 @@ function turnInstance(bot: BotRecord, runOn?: RoutineRunOn, threadId?: string): 
   });
   if (!picked) return selected;
   return registry.get(picked.instanceId) ?? selected;
+}
+
+function dropAntigravityResumeCursor(botId: string, threadId: string, instanceId: string): void {
+  const task = store.taskByThread(botId, threadId);
+  if (task?.resumeCursors[instanceId] === undefined) return;
+  const resumeCursors = { ...task.resumeCursors };
+  delete resumeCursors[instanceId];
+  store.patchTask(botId, threadId, { resumeCursors });
+}
+
+/** The quota banner already streamed. Publish it only when no other
+ * signed-in account can take the turn, so the routine still finishes. */
+function publishAntigravityUsageLimit(event: RuntimeEvent, notice: string): void {
+  const text = notice.trim() || "Usage Limit Reached\nYou have reached your current quota for this period.";
+  const turnId = event.turnId ?? newId();
+  const stamped = {
+    provider: event.provider,
+    providerInstanceId: event.providerInstanceId,
+    threadId: event.threadId,
+    turnId,
+    createdAt: new Date().toISOString(),
+  };
+  bus.publish({ ...stamped, eventId: newId(), type: "item.completed", itemType: "assistant_text", text });
+  bus.publish({ ...stamped, eventId: newId(), type: "turn.completed", ok: true, stopReason: null, cost: null });
+}
+
+function switchAntigravityAfterUsageLimit(bot: BotRecord, event: RuntimeEvent): void {
+  const blockedId = event.providerInstanceId ?? runningTurnEngines.get(event.threadId)?.instanceId;
+  const notice = antigravityReplyNotice(event.threadId) ?? "";
+  if (blockedId) {
+    noteAntigravityReplySwitch(event.threadId, blockedId, notice);
+    dropAntigravityResumeCursor(bot.id, event.threadId, blockedId);
+  }
+  const next = blockedId
+    ? pickAntigravityAccount({
+      accounts: antigravityPoolAccounts(),
+      exclude: antigravityReplySwitchExclude(event.threadId),
+      now: Date.now(),
+    })
+    : null;
+  const nextInstance = next ? registry.get(next.instanceId) : undefined;
+  const user = [...store.messagesFor(event.threadId)].reverse().find((message) =>
+    message.role === "user" && message.kind === "text" && Boolean(message.text?.trim()));
+  if (!next || !nextInstance || !user?.text) {
+    console.error(`[antigravity-pool] thread=${event.threadId} account=${blockedId ?? "unknown"} usage limit; no other account available`);
+    publishAntigravityUsageLimit(event, notice);
+    return;
+  }
+  const run = activeRoutineRunForThread(event.threadId);
+  console.error(`[antigravity-pool] thread=${event.threadId} account=${blockedId} usage limit; switching to ${next.instanceId}`);
+  stopScreenPoller(bot.id, event.threadId);
+  void startTurn(bot.id, user.text, {
+    threadId: event.threadId,
+    userMessage: user,
+    replacingTurn: true,
+    ...(run ? {
+      runOn: run.runOn,
+      automationSource: run.triggerSource ?? (run.manual ? "manual" : "schedule"),
+      unattended: true,
+    } : {}),
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[antigravity-pool] thread=${event.threadId} switch failed: ${message}`);
+    publishAntigravityUsageLimit(event, notice || message);
+  });
 }
 
 /** Preview requests carry the selected conversation, not whichever thread
@@ -4563,6 +4629,11 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     }
     case "turn.retrying":
+      if (event.reason === "antigravity_quota") {
+        if (bot) switchAntigravityAfterUsageLimit(bot, event);
+        else publishAntigravityUsageLimit(event, antigravityReplyNotice(event.threadId) ?? "");
+        break;
+      }
       // the driver is about to relaunch the turn after a transient failure;
       // the activity chip keeps the bot visibly busy through the backoff
       pushMessage({
@@ -5665,6 +5736,9 @@ async function startTurn(
     onDispatchError?: (message: string) => void;
     /** Queue receipts outlive the dispatch acknowledgment until this exact turn settles. */
     onTurnSettled?: () => void;
+    /** The current turn already holds this thread. A quota reply is handing
+     * the same user message to the next account without looking idle first. */
+    replacingTurn?: boolean;
     coordination?: { id: string; resumed: boolean; settle: (outcome: { ok: boolean; text: string }) => void };
   },
 ) {
@@ -5708,11 +5782,11 @@ async function startTurn(
   if (boxLifecycleBusyBots.has(botId)) {
     throw Object.assign(new Error("this bot's cloud computer is being changed — wait for it to finish"), { status: 409 });
   }
-  if (threadBusy(botId, threadId)) throw Object.assign(new Error("this thread is already working — interrupt it first"), { status: 409, code: "thread_busy" });
+  if (!opts?.replacingTurn && threadBusy(botId, threadId)) throw Object.assign(new Error("this thread is already working — interrupt it first"), { status: 409, code: "thread_busy" });
   if (activeGroupTurnForBot(botId)) {
     throw Object.assign(new Error("the bot is already working in a channel — wait for it to finish"), { status: 409, code: "thread_busy" });
   }
-  if (botAtThreadCapacity(botId)) {
+  if (!opts?.replacingTurn && botAtThreadCapacity(botId)) {
     throw Object.assign(new Error(`this bot has reached its limit of ${maxConcurrentBotThreads(cfg)} parallel threads — wait for one to finish`), { status: 409, code: "thread_limit" });
   }
   // Steering is never a cancel. A message sent while teammates are working
@@ -6708,7 +6782,7 @@ async function startTurn(
             });
           } catch (error) {
             if (routed.driverKind !== "antigravityAgent" || !antigravityAccountBlocked(error)) throw error;
-            noteAntigravityQuota(routedId);
+            noteAntigravityQuotaFromText(routedId, error instanceof Error ? error.message : String(error));
             exhaustedAntigravityAccounts.add(routedId);
             await routed.adapter.interruptTurn(threadId).catch(() => {});
             console.error(`[antigravity-pool] thread=${threadId} account=${routedId} blocked; switching`);
@@ -8499,7 +8573,7 @@ async function runGroupMemberTurn(
         onProviderHandshakeSettled?.();
         clearCancelledProviderHandshake(threadId, retirementOwner);
         if (instance.driverKind === "antigravityAgent" && antigravityAccountBlocked(err)) {
-          noteAntigravityQuota(instance.instanceId);
+          noteAntigravityQuotaFromText(instance.instanceId, err instanceof Error ? err.message : String(err));
           console.error(`[antigravity-pool] thread=${threadId} account=${instance.instanceId} blocked; next room turn will move`);
         }
         if (abandoned) return;

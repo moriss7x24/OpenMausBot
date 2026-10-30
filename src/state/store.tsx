@@ -3378,6 +3378,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (event.type === "turn.started" || event.type === "session.model-variants" || event.type === "turn.completed") {
             rawDispatch({ type: "modelVariantRuntime", event });
           }
+          if (event.type === "turn.retrying" && event.reason === "antigravity_quota") {
+            clearStream(event.threadId);
+          }
           if (event.type === "content.delta") {
             deltaBuffer.push(event.threadId, event.streamKind, event.delta);
           } else if (event.type === "turn.completed") {

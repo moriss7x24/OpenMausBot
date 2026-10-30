@@ -25,14 +25,74 @@ export interface AntigravityPoolMemory {
 
 const cooldownUntil = new Map<string, number>();
 const lastAssignedAt = new Map<string, number>();
+const replySwitchTried = new Map<string, Set<string>>();
+const replyNotices = new Map<string, string>();
 
 export function resetAntigravityPoolForTests(): void {
   cooldownUntil.clear();
   lastAssignedAt.clear();
+  replySwitchTried.clear();
+  replyNotices.clear();
 }
 
 export function noteAntigravityQuota(instanceId: string, now = Date.now(), cooldownMs = ANTIGRAVITY_QUOTA_COOLDOWN_MS): void {
   cooldownUntil.set(instanceId, now + cooldownMs);
+}
+
+/** Antigravity prints its quota wall as a normal assistant reply, then ends
+ * the turn. That text is not an answer and must move the thread to another
+ * signed-in account. Keep the match short so a real reply that merely
+ * mentions quota does not switch. */
+export function antigravityReplyNeedsAccountSwitch(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 800) return false;
+  return /usage limit reached|you have reached your current quota|verify your account to continue/i.test(trimmed);
+}
+
+/** Cooldown is the reset time printed in the quota message, for example
+ * "Your limit will reset in 4 hours, 57 minutes." A message with no
+ * duration does not invent one. */
+export function antigravityUsageLimitCooldownMs(text: string): number | null {
+  const match = /reset in\s+(?:(\d+)\s+hours?\b)?(?:(?:,|\s+and)\s+)?(?:(\d+)\s+minutes?\b)?/i.exec(text);
+  if (!match) return null;
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  if (!hours && !minutes) return null;
+  return (hours * 60 + minutes) * 60 * 1000;
+}
+
+/** A quota failure cools the account until the message's reset time. With
+ * no reset time, the short cooldown only stops an immediate retry. */
+export function noteAntigravityQuotaFromText(instanceId: string, text: string, now = Date.now()): void {
+  noteAntigravityQuota(instanceId, now, antigravityUsageLimitCooldownMs(text) ?? ANTIGRAVITY_QUOTA_COOLDOWN_MS);
+}
+
+export function rememberAntigravityReplyNotice(threadId: string, text: string): void {
+  replyNotices.set(threadId, text.trim().slice(0, 800));
+}
+
+export function antigravityReplyNotice(threadId: string): string | undefined {
+  return replyNotices.get(threadId);
+}
+
+export function noteAntigravityReplySwitch(threadId: string, instanceId: string, text: string, now = Date.now()): void {
+  const tried = replySwitchTried.get(threadId) ?? new Set<string>();
+  tried.add(instanceId);
+  replySwitchTried.set(threadId, tried);
+  // "Verify your account" is a Google check on that one request, not a
+  // quota window. Holding the account for hours leaves the other account's
+  // usage-limit banner with nowhere to go after the check is finished.
+  if (/verify your account to continue/i.test(text)) return;
+  noteAntigravityQuotaFromText(instanceId, text, now);
+}
+
+export function antigravityReplySwitchExclude(threadId: string): ReadonlySet<string> {
+  return replySwitchTried.get(threadId) ?? new Set<string>();
+}
+
+export function clearAntigravityReplySwitch(threadId: string): void {
+  replySwitchTried.delete(threadId);
+  replyNotices.delete(threadId);
 }
 
 /** Quota and rate-limit failures are the signal to leave this Google
