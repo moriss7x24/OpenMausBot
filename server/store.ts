@@ -18,7 +18,7 @@ import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
-import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
+import { approvalModeFor, isApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
@@ -1953,10 +1953,11 @@ export class Store {
 
   /** A fresh context on the same bot: new thread, new session, same
    * persona/tools/computer. Becomes the active task. */
-  createTask(botId: string, title?: string, activate = true, projectId?: string, openedBy?: TaskOpenedBy): TaskRecord | null {
+  createTask(botId: string, title?: string, activate = true, projectId?: string, openedBy?: TaskOpenedBy, approvalMode?: ApprovalMode): TaskRecord | null {
     const bot = this.bot(botId);
     if (!bot) return null;
     if (projectId !== undefined && !this.project(botId, projectId)) return null;
+    const mode = approvalMode ?? approvalModeFor(bot);
     const task: TaskRecord = {
       threadId: newId(),
       title: threadTitleFrom(title),
@@ -1965,8 +1966,8 @@ export class Store {
       ...(openedBy ? { openedBy: structuredClone(openedBy) } : {}),
       resumeCursors: {},
       modelSelection: structuredClone(bot.modelSelection),
-      approvalMode: approvalModeFor(bot),
-      autoApprove: Boolean(bot.autoApprove),
+      approvalMode: mode,
+      autoApprove: approvalMode ? mode === "auto" : Boolean(bot.autoApprove),
       alwaysAllow: [...(bot.alwaysAllow ?? [])],
       unread: false,
       activity: "idle",

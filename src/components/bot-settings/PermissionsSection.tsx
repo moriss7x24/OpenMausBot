@@ -120,8 +120,8 @@ export function PermissionsSection({
       <div className="rounded-xl bg-card p-4">
         <div className="text-[15px] font-medium text-ink">Approval level</div>
         <div className="mt-0.5 text-[13px] text-ink-secondary">
-          Default for new threads, routines and delegated work. Existing threads keep their own level;
-          change it from that thread’s composer.
+          Threads you open start at Full access. Routines and delegated work use this level.
+          Existing threads keep their own level; change one from that thread’s composer.
         </div>
         <div className="mt-3">
           <ApprovalModeSelector

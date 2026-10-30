@@ -66,12 +66,12 @@ describe("approval mode selector", () => {
 
   it.each(["cursorAgent", "opencodeGo"])("offers Full access for %s, and no Edits level it cannot map", (kind) => {
     expect(approvalModeOptionsFor(kind).map((option) => option.mode)).toEqual(["ask", "auto", "full"]);
-    expect(approvalModeOptionsFor(kind, false).map((option) => option.mode)).toEqual(["ask", "auto"]);
+    expect(approvalModeOptionsFor(kind, false).map((option) => option.mode)).toEqual(["ask", "auto", "full"]);
   });
 
   it("offers Grok its native acceptEdits as Auto-accept edits", () => {
     expect(approvalModeOptionsFor("grokAgent").map((option) => option.mode)).toEqual(["ask", "edits", "auto", "full"]);
-    expect(approvalModeOptionsFor("grokAgent", false).map((option) => option.mode)).toEqual(["ask", "edits", "auto"]);
+    expect(approvalModeOptionsFor("grokAgent", false).map((option) => option.mode)).toEqual(["ask", "edits", "auto", "full"]);
   });
 
   it("offers Antigravity Auto as the explicit full-access grant, not native review", () => {
@@ -83,7 +83,7 @@ describe("approval mode selector", () => {
     ]);
     expect(options[2].chip).toBe("Auto");
     expect(options[2].description).toContain("Automatically approve tool requests");
-    expect(approvalModeOptionsFor("antigravityAgent", false).map((option) => option.mode)).toEqual(["ask", "edits"]);
+    expect(approvalModeOptionsFor("antigravityAgent", false).map((option) => option.mode)).toEqual(["ask", "edits", "full"]);
   });
 
   it("shows the effective Antigravity mode without upgrading saved Auto settings", () => {
@@ -109,6 +109,7 @@ describe("approval mode selector", () => {
     expect(approvalModeOptionsFor("codex", false).map((option) => option.mode)).toEqual([
       "ask",
       "auto",
+      "full",
     ]);
   });
 

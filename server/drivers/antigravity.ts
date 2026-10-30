@@ -30,6 +30,14 @@ import {
 } from "./antigravity-runtime.ts";
 import { resolveAntigravityReleaseAsset } from "./antigravity-release.ts";
 import { augmentedPath } from "../env-path.ts";
+import {
+  antigravityNoteAssistantText,
+  antigravityNoteObserved,
+  antigravityNoteUsage,
+  antigravityPromptText,
+  antigravityResumeDecision,
+  antigravitySessionTracking,
+} from "./antigravity-session.ts";
 
 export const STATIC_ANTIGRAVITY_MODELS: ModelCatalog = {
   default: "gemini-3.8-flash-high",
@@ -71,6 +79,17 @@ const support: AcpSupport = {
   spawnArgs: () => [],
   selectModel: { configId: "model" },
   resumeMethod: "resume",
+  resumeDecision: (turn) => {
+    const decision = antigravityResumeDecision(turn);
+    if (antigravitySessionTracking()) {
+      console.error(`[antigravity-session] thread=${turn.threadId} ${decision.resume ? "resume" : "new"} ${decision.reason}`);
+    }
+    return decision;
+  },
+  noteUsage: antigravityNoteUsage,
+  noteObserved: antigravityNoteObserved,
+  noteAssistantDelta: antigravityNoteAssistantText,
+  buildPromptText: (turn, ctx) => antigravityPromptText(turn, ctx),
   clientFileSystem: true,
   redactStderr: true,
   sanitizeToolPayload: true,

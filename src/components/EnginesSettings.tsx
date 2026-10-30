@@ -14,6 +14,7 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { EngineSetup, EngineUpdateNotice, EngineWarningNotice } from "./EngineSetup";
 import { AddClaudeAccount, ClaudeAccountSettings } from "./ClaudeAccountSettings";
+import { AddAntigravityAccount, AntigravityAccountNote } from "./AntigravityAccountSettings";
 import { CodexAccountSettings } from "./CodexAccountSettings";
 
 interface ProbeResult {
@@ -262,6 +263,7 @@ function EngineRow({ instance }: { instance: InstanceInfo }) {
       {instance.snapshot.update && <EngineUpdateNotice update={instance.snapshot.update} instance={instance} className="mt-3" />}
       {instance.snapshot.warning && <EngineWarningNotice warning={instance.snapshot.warning} className="mt-3" />}
       {instance.claudeAccount && <ClaudeAccountSettings instance={instance} />}
+      {instance.antigravityAccount && <AntigravityAccountNote instance={instance} />}
       {engineReady(instance) && instance.snapshot.authenticated === true && (
         instance.authentication?.method === "device-code"
           ? <CodexAccountSettings instance={instance} />
@@ -354,7 +356,10 @@ export function EnginesSettings() {
         <RefreshEngines />
       </div>
       <EngineSections instances={rows} renderEngine={(instance) => <EngineRow instance={instance} />} />
-      <div className="border-t border-hairline/40 pt-4"><AddClaudeAccount /></div>
+      <div className="flex flex-col gap-2 border-t border-hairline/40 pt-4">
+        <AddClaudeAccount />
+        <AddAntigravityAccount />
+      </div>
     </div>
   );
 }

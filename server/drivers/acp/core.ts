@@ -155,8 +155,18 @@ export interface AcpSupport {
   requireAuthenticationBeforeSpawn?: boolean;
   /** Classify provider-native failures without coupling the core to messages. */
   classifyError?(error: unknown): ProviderErrorCode | undefined;
-  /** Compose the session/prompt text. Default prepends the persona. */
-  buildPromptText?(turn: SendTurnInput): string;
+  /** Compose the session/prompt text. Default prepends the persona.
+   * `ctx.resumed` is an ACP session continued from the cursor. `ctx.replay`
+   * means this harness discarded that cursor and is opening a fresh session. */
+  buildPromptText?(turn: SendTurnInput, ctx?: { resumed: boolean; replay: boolean }): string;
+  /** Keep or drop a resume cursor before session/resume. Omit to always honour it. */
+  resumeDecision?(turn: SendTurnInput): { resume: boolean; reason: string };
+  /** Record provider-reported input tokens for a later resume decision. */
+  noteUsage?(threadId: string, inputTokens: unknown): void;
+  /** Count text this process actually sent or saw, when the provider reports no usage. */
+  noteObserved?(threadId: string, chars: number): void;
+  /** Assistant text as it streams, so a harness can count it and spot a dead session. */
+  noteAssistantDelta?(threadId: string, delta: string, accumulated: string): void;
   /** Rewrite a picker id (`omlx::model`) into the CLI-native id before spawn
    * and session/select. Local inject writers live here so the child sees a
    * model it already knows. */
@@ -830,6 +840,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 });
               } else if (typeof delta === "string" && delta) {
                 state.text += delta;
+                support.noteAssistantDelta?.(threadId, delta, state.text);
                 emit({ ...base(threadId, turnId), type: "content.delta", streamKind: "assistant_text", delta });
               }
               break;
@@ -855,6 +866,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               break;
             }
             case "tool_call_update": {
+              const observed = u.rawOutput ?? u.content;
+              if (observed) support.noteObserved?.(threadId, JSON.stringify(observed).length);
               if (u.status === "completed" || u.status === "failed") {
                 emit({
                   ...base(threadId, turnId),
@@ -985,7 +998,16 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // http/sse never sees an entry it would refuse the session over
             const sessionServers = mcpServers.filter((server) =>
               !("type" in server) || init?.agentCapabilities?.mcpCapabilities?.[server.type] === true);
-            const cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
+            let cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
+            let replayForPrompt = false;
+            if (cursor && support.resumeDecision) {
+              const decision = support.resumeDecision(turn);
+              if (!decision.resume) {
+                cursor = null;
+                replayForPrompt = true;
+                support.noteUsage?.(threadId, 0);
+              }
+            }
             // a fresh native session forgets what the previous one allowed
             if (!cursor) sessionAllows.delete(threadId);
             let sessionResult: any = null;
@@ -1083,11 +1105,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               throw error;
             }
             emitSessionStarted();
+            const resumed = Boolean(cursor && sessionId === cursor);
             const text = support.buildPromptText
-              ? support.buildPromptText(turn)
+              ? support.buildPromptText(turn, { resumed, replay: replayForPrompt })
               : turn.system
                 ? `${turn.system}\n\n${turn.text}`
                 : turn.text;
+            support.noteObserved?.(threadId, text.length);
             const imageBlocks = support.images === true && runtimeAcceptsImages
               ? await readAcpImageBlocks(images)
               : [];
@@ -1105,6 +1129,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // opencode 1.18.18 reports usage at the result root; grok and
             // gemini put it under _meta. Read both rather than lose the count.
             const usage = result?.usage ?? result?._meta ?? {};
+            support.noteUsage?.(threadId, usage.inputTokens);
             if (typeof usage.inputTokens === "number" || typeof usage.outputTokens === "number") {
               emit({
                 ...base(threadId, turnId),

@@ -267,12 +267,21 @@ export function ModelEngineRail({ instances, selectedInstance, claudeInstance, o
 }) {
   const firstClaude = instances.find((instance) => instance.driverKind === "claudeAgent" && instance.claudeAccount?.isDefault)
     ?? instances.find((instance) => instance.driverKind === "claudeAgent");
-  const providers = instances.filter((instance) => instance.driverKind !== "claudeAgent" || instance === firstClaude);
+  const firstAntigravity = instances.find((instance) => instance.driverKind === "antigravityAgent" && instance.antigravityAccount?.isDefault)
+    ?? instances.find((instance) => instance.driverKind === "antigravityAgent");
+  const providers = instances.filter((instance) =>
+    (instance.driverKind !== "claudeAgent" || instance === firstClaude) &&
+    (instance.driverKind !== "antigravityAgent" || instance === firstAntigravity));
   const { subscription, custom: local } = splitEngineRail(providers);
   const railButton = (instance: InstanceInfo) => {
     const claude = instance.driverKind === "claudeAgent";
+    const antigravity = instance.driverKind === "antigravityAgent";
     const target = claude ? claudeInstance ?? instance : instance;
-    const selected = claude ? selectedInstance?.driverKind === "claudeAgent" : instance.instanceId === selectedInstance?.instanceId;
+    const selected = claude
+      ? selectedInstance?.driverKind === "claudeAgent"
+      : antigravity
+        ? selectedInstance?.driverKind === "antigravityAgent"
+        : instance.instanceId === selectedInstance?.instanceId;
     const label = claude ? "Claude" : instance.displayName;
     const attention = needsCli(target) || needsSignIn(target) || Boolean(target.snapshot.update);
     return (
@@ -359,6 +368,8 @@ export function ModelPicker({
       ?? { id: selection.variant, label: selection.variant },
   );
   const claudeAccounts = state.instances.filter((instance) => instance.driverKind === "claudeAgent");
+  const antigravityAccounts = state.instances.filter((instance) => instance.driverKind === "antigravityAgent");
+  const signedInAntigravity = antigravityAccounts.filter((instance) => instance.snapshot.authenticated === true).length;
   const multipleClaudeAccounts = claudeAccounts.length > 1;
   const showActiveAccount = multipleClaudeAccounts && active?.driverKind === "claudeAgent";
   const claudeRailInstance = claudeAccounts.find((instance) => instance.instanceId === lastClaudeIdRef.current)
@@ -612,7 +623,12 @@ export function ModelPicker({
               <>
                 <div className="shrink-0 px-4 pb-2 pt-3.5">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="truncate text-[14px] font-semibold text-ink">{railInstance.driverKind === "claudeAgent" ? "Claude" : railInstance.displayName}</div>
+                    <div className="min-w-0">
+                      <div className="truncate text-[14px] font-semibold text-ink">{railInstance.driverKind === "claudeAgent" ? "Claude" : railInstance.displayName}</div>
+                      {railInstance.driverKind === "antigravityAgent" && antigravityAccounts.length > 1 && (
+                        <p className="mt-0.5 text-[11.5px] font-normal leading-relaxed text-ink-secondary">{t("engines.antigravity.poolHint", { count: signedInAntigravity })}</p>
+                      )}
+                    </div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
                         type="button"

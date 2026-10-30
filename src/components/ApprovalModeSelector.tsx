@@ -50,7 +50,7 @@ export function approvalModeOptionsFor(driverKind: string, trustedModesAvailable
       // Antigravity has no native reviewer. Offer its explicit full-access
       // grant as Auto instead of a second choice that actually behaves as Ask.
       && (driverKind !== "antigravityAgent" || option.mode !== "auto")
-      && (trustedModesAvailable || option.mode === "ask" || option.mode === "edits" || option.mode === "auto"))
+      && (trustedModesAvailable || option.mode === "ask" || option.mode === "edits" || option.mode === "auto" || option.mode === "full"))
     .map((option) => {
       if (driverKind === "antigravityAgent" && option.mode === "full") {
         return {
@@ -227,13 +227,9 @@ export function ApprovalModeSelector({
                 </button>
               );
             })}
-            {!trustedModesAvailable && (trustedModesNotice || driverKind === "codex" || driverKind === "antigravityAgent" || requiresLocalDesktop) && (
+            {!trustedModesAvailable && (trustedModesNotice || requiresLocalDesktop) && (
               <div className="border-t border-hairline/20 px-4 py-2.5 text-[11.5px] leading-snug text-ink-secondary">
-                {trustedModesNotice ?? (requiresLocalDesktop
-                  ? t("approvalMode.customLocalOnlyDot")
-                  : driverKind === "antigravityAgent"
-                    ? t("approvalMode.antigravityLocalOnly")
-                    : t("approvalMode.trustedLocalOnly"))}
+                {trustedModesNotice ?? t("approvalMode.customLocalOnlyDot")}
               </div>
             )}
           </div>

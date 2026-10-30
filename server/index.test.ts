@@ -4141,7 +4141,7 @@ describe("harness HTTP API", () => {
       expect(switched.body.bot.tasks.find((task: { threadId: string }) => task.threadId === sibling.threadId))
         .toMatchObject({ modelSelection: full.modelSelection, approvalMode: "full" });
       const created = await isolatedApi("POST", `/api/bots/${full.id}/tasks`, { title: "New defaults" });
-      expect(created.body.task).toMatchObject({ modelSelection: targetSelection, approvalMode: "ask" });
+      expect(created.body.task).toMatchObject({ modelSelection: targetSelection, approvalMode: "full" });
       const refusedCustom = trustedBots.find(candidate => candidate.approvalMode === "custom")!;
       expect((await isolatedApi("PATCH", `/api/bots/${refusedCustom.id}/tasks/${refusedCustom.threadId}`, {
         modelSelection: targetSelection, resetApprovalToAsk: true,
@@ -5638,7 +5638,7 @@ describe("harness HTTP API", () => {
     await api("DELETE", `/api/bots/${bot.id}`);
   });
 
-  it("stores safe approval levels and refuses trusted modes over HTTP", async () => {
+  it("stores safe approval levels, grants confirmed Full, and keeps Custom on the desktop", async () => {
     const bot = (await api("POST", "/api/bots", {
       modelSelection: { instanceId: "codex", model: "fixture-codex-model" },
     })).body.bot;
@@ -5654,47 +5654,49 @@ describe("harness HTTP API", () => {
       const ask = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "ask" });
       expect(ask.status).toBe(200);
       expect(ask.body.bot).toMatchObject({ approvalMode: "ask", autoApprove: false });
+      const opened = await api("POST", `/api/bots/${bot.id}/tasks`, { title: "Opened while Ask" });
+      expect(opened.status).toBe(201);
+      expect(opened.body.task.approvalMode).toBe("full");
 
-      // Both modes are equivalent to native Codex configuration grants. A
-      // tool can call this loopback route, so even a forged renderer-only
-      // acknowledgement must not cross the trusted desktop boundary.
-      for (const approvalMode of ["full", "custom"]) {
-        for (const body of [
-          { approvalMode },
-          { approvalMode, acknowledgeFullAccess: true },
-        ]) {
-          const rejected = await api("PATCH", `/api/bots/${bot.id}`, body);
-          expect(rejected.status, JSON.stringify(body)).toBe(403);
-          expect(rejected.body.error).toMatch(/desktop app/i);
-        }
+      const unconfirmed = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "full" });
+      expect(unconfirmed.status).toBe(400);
+      const full = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "full", confirmFullAccess: true });
+      expect(full.status).toBe(200);
+      expect(full.body.bot).toMatchObject({ approvalMode: "full", autoApprove: false });
+      const created = await api("POST", `/api/bots/${bot.id}/tasks`, {});
+      expect(created.status).toBe(201);
+      expect(created.body.task.approvalMode).toBe("full");
+      for (const body of [
+        { approvalMode: "custom" },
+        { approvalMode: "custom", acknowledgeFullAccess: true },
+      ]) {
+        const rejected = await api("PATCH", `/api/bots/${bot.id}`, body);
+        expect(rejected.status, JSON.stringify(body)).toBe(403);
+        expect(rejected.body.error).toMatch(/desktop app/i);
       }
 
       const stored = (await api("GET", "/api/bots")).body.bots.find(
         (candidate: { id: string }) => candidate.id === bot.id,
       );
-      expect(stored).toMatchObject({ approvalMode: "ask", autoApprove: false });
+      expect(stored).toMatchObject({ approvalMode: "full", autoApprove: false });
     } finally {
       await api("DELETE", `/api/bots/${bot.id}`);
     }
   });
 
-  it("requires private desktop consent for Claude Full and rejects Codex-only Custom", async () => {
+  it("lets the web UI grant Claude Full after confirmation and rejects Codex-only Custom", async () => {
     const bot = (await api("POST", "/api/bots", {
       modelSelection: { instanceId: "claude", model: "fixture-claude-model" },
     })).body.bot;
     try {
-      for (const approvalMode of ["full", "custom"]) {
-        const rejected = await api("PATCH", `/api/bots/${bot.id}`, {
-          approvalMode,
-          acknowledgeFullAccess: true,
-        });
-        expect(rejected.status, approvalMode).toBe(approvalMode === "full" ? 403 : 400);
-        expect(rejected.body.error).toMatch(approvalMode === "full" ? /desktop app/i : /does not support/i);
-      }
-      const stored = (await api("GET", "/api/bots")).body.bots.find(
-        (candidate: { id: string }) => candidate.id === bot.id,
-      );
-      expect(stored.approvalMode).toBeUndefined();
+      const unconfirmed = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "full" });
+      expect(unconfirmed.status).toBe(400);
+      const full = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "full", confirmFullAccess: true });
+      expect(full.status).toBe(200);
+      expect(full.body.bot).toMatchObject({ approvalMode: "full" });
+      const custom = await api("PATCH", `/api/bots/${bot.id}`, { approvalMode: "custom" });
+      expect(custom.status).toBe(400);
+      expect(custom.body.error).toMatch(/does not support/i);
     } finally {
       await api("DELETE", `/api/bots/${bot.id}`);
     }
