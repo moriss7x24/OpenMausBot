@@ -95,19 +95,19 @@ describe("bot patch queue", () => {
 
     queue.enqueue(
       "bot-1",
-      { approvalMode: "full", confirmFullAccess: true },
+      { approvalMode: "custom" },
       bot({ approvalMode: "ask" }),
     );
     await vi.runAllTicks();
     expect(signals[0]?.aborted).toBe(false);
 
-    queue.enqueue("bot-1", { approvalMode: "ask" }, bot({ approvalMode: "full" }));
+    queue.enqueue("bot-1", { approvalMode: "ask" }, bot({ approvalMode: "custom" }));
     expect(signals[0]?.aborted).toBe(true);
     await vi.runAllTicks();
     await queue.flush("bot-1");
 
     expect(sent).toEqual([
-      { approvalMode: "full", confirmFullAccess: true },
+      { approvalMode: "custom" },
       { approvalMode: "ask" },
     ]);
   });

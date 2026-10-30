@@ -35,6 +35,8 @@ import {
 import { approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, deliverFullAccessApproval, delegationInheritsFullAccess } from "./auto-approve.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
+import { createAntigravityAccountSchema, newAntigravityAccount } from "./antigravity-accounts.ts";
+import { antigravityAccountBlocked, antigravityAccountLoggedIn, antigravitySiblingKeepsModel, assignAntigravityAccount, noteAntigravityAssignment, noteAntigravityQuota, pickAntigravityAccount } from "./antigravity-pool.ts";
 import { providerIconPatchSchema, withInstanceIcon } from "./provider-icon.ts";
 import { providerIconError } from "../shared/provider-icon.ts";
 import {
@@ -1861,6 +1863,13 @@ const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMod
   }
   return mode;
 };
+
+/** A thread the person opens starts at Full access when this provider can
+ * actually run it. Routines and delegated work keep the bot's own level. */
+const openedThreadApproval = (bot: BotRecord): ApprovalMode | undefined =>
+  supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, "full")
+    ? "full"
+    : undefined;
 
 /** Full belongs to the requesting conversation, not whichever sibling is
  * selected in the UI or the bot's default for future conversations. */
@@ -3914,11 +3923,36 @@ function turnProvider(bot: BotRecord, runOn?: RoutineRunOn, threadId?: string): 
  * bot's own harness there with the computer tools built in, so nothing on this
  * machine relays clicks and screenshots. Every start/interrupt of a turn asks
  * here which engine owns it. */
+function antigravityPoolAccounts() {
+  return registry.instances()
+    .filter((candidate) => candidate.driverKind === "antigravityAgent")
+    .map((candidate) => ({
+      instanceId: candidate.instanceId,
+      authenticated: antigravityAccountLoggedIn(candidate.instanceId),
+      changing: providerInstancesChanging.has(candidate.instanceId),
+    }));
+}
+
 function turnInstance(bot: BotRecord, runOn?: RoutineRunOn, threadId?: string): ReturnType<typeof registry.get> {
   const onBox = turnProvider(bot, runOn, threadId) === "box";
-  return onBox
-    ? registry.instances().find((candidate) => candidate.driverKind === "boxAgent") ?? null
-    : registry.get(bot.modelSelection.instanceId);
+  if (onBox) return registry.instances().find((candidate) => candidate.driverKind === "boxAgent") ?? null;
+  const selected = registry.get(bot.modelSelection.instanceId);
+  if (!selected || selected.driverKind !== "antigravityAgent") return selected ?? null;
+  // Status and prompt previews call this too. Only a real dispatch records
+  // the assignment, and a room turn with no task thread stays on the bot's
+  // selected account.
+  if (!threadId) return selected;
+  const task = store.taskByThread(bot.id, threadId);
+  const preferredId = task?.lastInstanceId;
+  const preferredInPool = preferredId !== undefined && registry.get(preferredId)?.driverKind === "antigravityAgent";
+  const picked = pickAntigravityAccount({
+    accounts: antigravityPoolAccounts(),
+    preferredId: preferredInPool ? preferredId : undefined,
+    preferredCanResume: Boolean(preferredInPool && preferredId && task?.resumeCursors[preferredId] !== undefined),
+    now: Date.now(),
+  });
+  if (!picked) return selected;
+  return registry.get(picked.instanceId) ?? selected;
 }
 
 /** Preview requests carry the selected conversation, not whichever thread
@@ -5749,7 +5783,14 @@ async function startTurn(
   if (providerInstancesChanging.has(instanceId)) {
     throw Object.assign(new Error("this provider account is being updated — try again shortly"), { status: 409 });
   }
-  const switchedEngine = instance.instanceId !== bot.modelSelection.instanceId;
+  const switchedEngine = instance.instanceId !== bot.modelSelection.instanceId
+    && !antigravitySiblingKeepsModel({
+      routedKind: instance.driverKind,
+      selectedKind: registry.get(bot.modelSelection.instanceId)?.driverKind,
+      model: bot.modelSelection.model,
+      optionIds: instance.models.options.map((option) => option.id),
+      fallback: instance.models.default,
+    });
   const model = opts?.runOn === "cloud" || switchedEngine ? instance.models.default : bot.modelSelection.model;
   // a cloud routine borrows the instance default model, so it borrows no
   // per-bot effort either
@@ -6608,55 +6649,95 @@ async function startTurn(
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
         { id: "mentions", label: "Mentions", text: boundedCoordination && tagged.length ? `The user named these existing teammates: ${tagged.map(b => `${peerName(b.name)} (${b.id})`).join(", ")}. Use coordinate_bots when their contribution is needed; do not substitute native helper agents for these bots.` : mentionPrompt(tagged) },
       ]);
-      runningTurnEngines.set(threadId, instance);
       // The prompt carries the soul as saved now. If it changed during setup,
       // decide again from what is actually sent.
       const dispatchedConfig = sessionConfig(liveBot?.soul ?? bot.soul);
       if (strictResume && dispatchedConfig !== plannedConfig) dispatchContext = decideContext(dispatchedConfig);
       // Before sendTurn: an adapter may emit the whole turn before it resolves.
       handoffs.dispatching(threadId, dispatchClaimId, dispatchContext.handoff);
-      const dispatch = await guardTurnDispatch(instance.adapter.sendTurn({
-        threadId,
-        botId: bot.id,
-        text: dispatchContext.turnText,
-        refreshSystemPrompt: true,
-        images: turnImages,
-        approvalMode: approvalModeForTurn(bot, commsDepth > 0),
-        model,
-        effort,
-        variant,
-        // a rewound thread never resumes the abandoned branch's session
-        // the active task's own session — another task's cursor would
-        // resume the wrong conversation and defeat the context bubble
-        resumeCursor: dispatchContext.resumeCursor,
-        ...(instance.driverKind === "antigravityAgent" ? {
-          antigravityAffinity: antigravityAffinityForDispatch({
-            threadId,
-            userText: String(userMessage.text ?? ""),
-            messages: activeMessages,
-            userMessageId: userMessage.id,
-            userMessageAt: userMessage.at,
-            commsDepth,
-            peerAsk: Boolean(opts?.peerAsk) || Boolean(userMessage.peerAsk),
-            fromBot: Boolean(userMessage.from),
-            coordination: Boolean(opts?.coordination),
-            cardContinuation: Boolean(opts?.cardContinuation),
-            contextTokens: Number(task.usage?.context?.tokens) || 0,
-            lastTurnInput: Number(task.usage?.lastTurn?.input) || 0,
-          }),
-        } : {}),
-        ...(dispatchContext.recoveryText !== undefined ? { recoveryText: dispatchContext.recoveryText } : {}),
-        ...(dispatchContext.recoveryIsReplay ? { recoveryIsReplay: true } : {}),
-        transcript,
-        system: prompt.text,
-        systemStable: prompt.stable,
-        systemVolatile: prompt.volatile,
-        integrations,
-        mcpFromUserConfig: claudeUserMcpEnabled(cfg),
-        cwd,
-      }), () => !directTurnClaimExists(bot.id, dispatchClaimId, threadId), async () => {
-        await instance.adapter.interruptTurn(threadId).catch(() => {});
-      });
+      if (instance.driverKind === "antigravityAgent") noteAntigravityAssignment(instance.instanceId);
+      let routed = instance;
+      let routedId = instanceId;
+      let routedContext = dispatchContext;
+      const exhaustedAntigravityAccounts = new Set<string>();
+      const dispatch = await (async () => {
+        for (;;) {
+          runningTurnEngines.set(threadId, routed);
+          try {
+            return await guardTurnDispatch(routed.adapter.sendTurn({
+              threadId,
+              botId: bot.id,
+              text: routedContext.turnText,
+              refreshSystemPrompt: true,
+              images: turnImages,
+              approvalMode: approvalModeForTurn(bot, commsDepth > 0),
+              model,
+              effort,
+              variant,
+              // a rewound thread never resumes the abandoned branch's session
+              // the active task's own session — another task's cursor would
+              // resume the wrong conversation and defeat the context bubble
+              resumeCursor: routedContext.resumeCursor,
+              ...(routed.driverKind === "antigravityAgent" ? {
+                antigravityAffinity: antigravityAffinityForDispatch({
+                  threadId,
+                  userText: String(userMessage.text ?? ""),
+                  messages: activeMessages,
+                  userMessageId: userMessage.id,
+                  userMessageAt: userMessage.at,
+                  commsDepth,
+                  peerAsk: Boolean(opts?.peerAsk) || Boolean(userMessage.peerAsk),
+                  fromBot: Boolean(userMessage.from),
+                  coordination: Boolean(opts?.coordination),
+                  cardContinuation: Boolean(opts?.cardContinuation),
+                  contextTokens: Number(task.usage?.context?.tokens) || 0,
+                  lastTurnInput: Number(task.usage?.lastTurn?.input) || 0,
+                }),
+              } : {}),
+              ...(routedContext.recoveryText !== undefined ? { recoveryText: routedContext.recoveryText } : {}),
+              ...(routedContext.recoveryIsReplay ? { recoveryIsReplay: true } : {}),
+              transcript,
+              system: prompt.text,
+              systemStable: prompt.stable,
+              systemVolatile: prompt.volatile,
+              integrations,
+              mcpFromUserConfig: claudeUserMcpEnabled(cfg),
+              cwd,
+            }), () => !directTurnClaimExists(bot.id, dispatchClaimId, threadId), async () => {
+              await routed.adapter.interruptTurn(threadId).catch(() => {});
+            });
+          } catch (error) {
+            if (routed.driverKind !== "antigravityAgent" || !antigravityAccountBlocked(error)) throw error;
+            noteAntigravityQuota(routedId);
+            exhaustedAntigravityAccounts.add(routedId);
+            await routed.adapter.interruptTurn(threadId).catch(() => {});
+            console.error(`[antigravity-pool] thread=${threadId} account=${routedId} blocked; switching`);
+            const next = assignAntigravityAccount({
+              accounts: antigravityPoolAccounts(),
+              exclude: exhaustedAntigravityAccounts,
+            });
+            const nextInstance = next ? registry.get(next.instanceId) : undefined;
+            if (!next || !nextInstance) throw error;
+            const replay = buildTurnContext({
+              text: userTurnText,
+              transcript,
+              rewound: false,
+              fresh: true,
+              externallyUpdated: false,
+              replaysNatively: false,
+            });
+            routed = nextInstance;
+            routedId = nextInstance.instanceId;
+            routedContext = {
+              ...routedContext,
+              turnText: replay.turnText,
+              resumeCursor: undefined,
+              recoveryText: undefined,
+              recoveryIsReplay: false,
+            };
+          }
+        }
+      })();
       if (dispatch.cancelled) {
         retireProviderTurn(dispatch.value.turnId);
         throw new DirectTurnSetupCancelled("turn stopped during provider setup");
@@ -6678,7 +6759,7 @@ async function startTurn(
       // If a newer delegated result landed during setup, its unique marker
       // differs and must survive so the next turn also receives that update.
       if (!isExternalContextMarker(task.lastInstanceId) || task.lastInstanceId === externalContextMarker) {
-        store.markTaskDispatched(bot.id, threadId, instanceId);
+        store.markTaskDispatched(bot.id, threadId, routedId);
       }
       // a turn can settle before dispatch returns, and a poller started
       // after its own turn.completed would never be torn down — it would
@@ -6689,7 +6770,7 @@ async function startTurn(
           bot.id,
           threadId,
           { ...(previewCapture ? { computer: previewCapture } : {}), ...(browserCapture ? { browser: browserCapture } : {}) },
-          { screenIsTheWork: instance.driverKind === "boxAgent" },
+          { screenIsTheWork: routed.driverKind === "boxAgent" },
         );
       }
       // An adapter may publish completion synchronously just before its
@@ -8367,6 +8448,7 @@ async function runGroupMemberTurn(
     watchdog.watch(threadId, bot.id);
     onProviderHandshakeStarted?.();
     providerDispatched = true;
+    if (instance.driverKind === "antigravityAgent") noteAntigravityAssignment(instance.instanceId);
     runningTurnEngines.set(threadId, instance);
     guardTurnDispatch(instance.adapter.sendTurn({
         threadId,
@@ -8382,6 +8464,13 @@ async function runGroupMemberTurn(
         integrations,
         mcpFromUserConfig: claudeUserMcpEnabled(cfg),
         ...(instance.instanceId === readyBot.modelSelection.instanceId
+          || antigravitySiblingKeepsModel({
+            routedKind: instance.driverKind,
+            selectedKind: registry.get(readyBot.modelSelection.instanceId)?.driverKind,
+            model: readyBot.modelSelection.model,
+            optionIds: instance.models.options.map((option) => option.id),
+            fallback: instance.models.default,
+          })
           ? memberTurnSelection(readyBot.modelSelection)
           : { model: instance.models.default }),
       }), () => abandoned || Boolean(isCancelled?.()), async () => {
@@ -8409,6 +8498,10 @@ async function runGroupMemberTurn(
       .catch((err) => {
         onProviderHandshakeSettled?.();
         clearCancelledProviderHandshake(threadId, retirementOwner);
+        if (instance.driverKind === "antigravityAgent" && antigravityAccountBlocked(err)) {
+          noteAntigravityQuota(instance.instanceId);
+          console.error(`[antigravity-pool] thread=${threadId} account=${instance.instanceId} blocked; next room turn will move`);
+        }
         if (abandoned) return;
         const message = err instanceof Error ? err.message : "turn failed";
         store.appendMessage(threadId, {
@@ -10298,6 +10391,9 @@ async function describeInstances() {
       ...described, readOnly: true, managed: managedDesktop.info(instance.instanceId),
       install: undefined, authentication: undefined, cli: undefined, cliCandidates: [],
     };
+    if (entry?.driver === "antigravityAgent") {
+      return { ...described, antigravityAccount: { isDefault: instance.instanceId === "antigravity" } };
+    }
     if (entry?.driver !== "claudeAgent") return described;
     try {
       const claudeAccount = claudeAccountInfo(instance.instanceId, entry, instance.cli ?? instance.cliDefault ?? "claude");
@@ -14256,6 +14352,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 409, { error: `this workspace is limited to ${MAX_WORKSPACE_BOTS} bots` });
       }
       const bot = store.createBot({ ...profile.patch, section, modelSelection: selection });
+      const opened = openedThreadApproval(bot);
+      if (opened) store.patchTask(bot.id, bot.threadId, { approvalMode: opened, autoApprove: false });
       return json(res, 201, {
         bot: {
           ...wireBot(bot),
@@ -14589,6 +14687,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.autoApprove !== undefined) {
         if (typeof body.autoApprove !== "boolean") return json(res, 400, { error: "autoApprove must be true or false" });
       }
+      if (body.confirmFullAccess !== undefined && body.confirmFullAccess !== true) {
+        return json(res, 400, { error: "confirmFullAccess must be true" });
+      }
       let requestedApprovalMode: ApprovalMode;
       if (body.approvalMode !== undefined) {
         if (!isApprovalMode(body.approvalMode)) {
@@ -14637,9 +14738,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           error: "This provider does not support the selected approval level, or changing providers requires choosing Ask first",
         });
       }
+      if (
+        requestedApprovalMode === "full" &&
+        currentApprovalMode !== "full" &&
+        body.confirmFullAccess !== true
+      ) {
+        return json(res, 400, { error: "Full access requires confirming the warning first (confirmFullAccess)" });
+      }
       const requiresPrivateApprovalTransition =
-        ((requestedApprovalMode === "full" || requestedApprovalMode === "custom") &&
-          currentApprovalMode !== requestedApprovalMode) ||
+        (requestedApprovalMode === "custom" && currentApprovalMode !== "custom") ||
         (currentApprovalMode === "custom" && requestedApprovalMode !== "custom");
       if (requiresPrivateApprovalTransition) {
         return json(res, 403, {
@@ -15860,7 +15967,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.projectId !== undefined && (typeof body.projectId !== "string" || !store.project(bot.id, body.projectId))) {
         return json(res, 400, { error: "projectId must belong to this bot" });
       }
-      const task = store.createTask(bot.id, typeof body.title === "string" ? body.title : undefined, true, body.projectId);
+      const task = store.createTask(
+        bot.id,
+        typeof body.title === "string" ? body.title : undefined,
+        true,
+        body.projectId,
+        undefined,
+        openedThreadApproval(bot),
+      );
       if (!task) return json(res, 500, { error: "couldn't create that task" });
       const fresh = botWithThread(store.bot(bot.id)!);
       broadcast({ kind: "bot", bot: fresh });
@@ -15888,7 +16002,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
       const current = store.projectBotForTask(m[1], m[2]);
       if (!current) return json(res, 404, { error: "no such task" });
-      const allowed = new Set(["title", "projectId", "modelSelection", "updateBotDefault", "resetApprovalToAsk", "approvalMode", "autoApprove", "requireAvailableModel", "pinnedMessageId", "acknowledgeLocalAuto", "archivedAt", "surface"]);
+      const allowed = new Set(["title", "projectId", "modelSelection", "updateBotDefault", "resetApprovalToAsk", "approvalMode", "autoApprove", "confirmFullAccess", "requireAvailableModel", "pinnedMessageId", "acknowledgeLocalAuto", "archivedAt", "surface"]);
       if (Object.keys(body).some((key) => !allowed.has(key))) return json(res, 400, { error: "unsupported thread setting" });
       for (const key of ["requireAvailableModel", "acknowledgeLocalAuto", "updateBotDefault", "resetApprovalToAsk"] as const) {
         if (body[key] !== undefined && typeof body[key] !== "boolean") return json(res, 400, { error: `${key} must be a boolean` });
@@ -15936,9 +16050,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.approvalMode !== undefined || body.autoApprove !== undefined) {
         if (body.autoApprove !== undefined && typeof body.autoApprove !== "boolean") return json(res, 400, { error: "autoApprove must be a boolean" });
         const mode = body.approvalMode ?? (body.autoApprove ? "auto" : "ask");
-        // Elevated modes still require the trusted desktop transition. A
-        // thread settings PATCH cannot manufacture that grant.
-        if (mode !== "ask" && mode !== "auto" && mode !== "edits") return json(res, 403, { error: "Full and Custom access require trusted desktop confirmation" });
+        // Custom still needs the desktop bridge. Full is a normal web choice
+        // on this deployment: the composer warning is the confirmation.
+        if (mode === "custom") return json(res, 403, { error: "Custom access requires trusted desktop confirmation" });
+        if (mode !== "ask" && mode !== "auto" && mode !== "edits" && mode !== "full") return json(res, 400, { error: "approvalMode must be ask, edits, auto, or full" });
         if (approvalModeFor(current) === "custom") return json(res, 403, { error: "Leaving Custom approval requires confirmation in the packaged desktop app" });
         if (!supportsApprovalMode(registry.cliTarget((patch.modelSelection ?? current.modelSelection).instanceId)?.driverKind, mode)) {
           return json(res, 400, { error: "This provider does not support the selected approval level" });
@@ -15950,6 +16065,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (mode === "auto" && current.computer === "local" && approvalModeFor(current) !== "auto" && body.acknowledgeLocalAuto !== true) {
           return json(res, 400, { error: "Auto mode on this computer requires confirming the warning first (acknowledgeLocalAuto)" });
+        }
+        if (mode === "full" && approvalModeFor(current) !== "full" && body.confirmFullAccess !== true) {
+          return json(res, 400, { error: "Full access requires confirming the warning first (confirmFullAccess)" });
         }
         patch.approvalMode = mode;
         patch.autoApprove = mode === "auto";
@@ -16489,6 +16607,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } finally { providerConfigBusy = false; }
     }
 
+    if (method === "POST" && path === "/api/instances/antigravity-accounts") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      const parsed = createAntigravityAccountSchema.safeParse(await readBody(req, 8192));
+      if (!parsed.success) return json(res, 400, { error: "Enter an account name (up to 80 characters)." });
+      if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      providerConfigBusy = true;
+      try {
+        const { instanceId, instances } = newAntigravityAccount(cfg, parsed.data);
+        await persistProviderInstance(instanceId, instances);
+        return json(res, 201, { instanceId, instances: await describeInstances() });
+      } finally { providerConfigBusy = false; }
+    }
+
     const authStatus = /^\/api\/instances\/([\w.-]+)\/auth\/status$/.exec(path);
     if (method === "GET" && authStatus) {
       res.setHeader("cache-control", "no-store");
@@ -16650,8 +16783,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const instances = persistableInstanceConfigs(result.config);
         if (!result.ok || !Object.hasOwn(instances, instanceId)) return json(res, 404, { error: `unknown instance "${instanceId}"` });
         const entry = instances[instanceId];
-        if ((body.displayName !== undefined || body.configDir !== undefined) && entry.driver !== "claudeAgent") {
-          return json(res, 400, { error: "Account settings are currently available for Claude only." });
+        if (body.configDir !== undefined && entry.driver !== "claudeAgent") {
+          return json(res, 400, { error: "Configuration directories are currently available for Claude only." });
+        }
+        if (body.displayName !== undefined && entry.driver !== "claudeAgent" && entry.driver !== "antigravityAgent") {
+          return json(res, 400, { error: "Account names are currently available for Claude and Antigravity only." });
         }
         if (body.tools !== undefined) {
           if (!["openai-compat", "grok", "minimax"].includes(entry.driver)) {
@@ -16684,12 +16820,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
       const instances = persistableInstanceConfigs(cfg);
       if (!Object.hasOwn(instances, instanceId)) return json(res, 404, { error: "unknown instance" });
-      if (instances[instanceId].driver !== "claudeAgent" || instanceId === "claude") {
-        return json(res, 400, { error: "Only added Claude accounts can be removed here." });
+      const entry = instances[instanceId];
+      const removable = (entry.driver === "claudeAgent" && instanceId !== "claude")
+        || (entry.driver === "antigravityAgent" && instanceId !== "antigravity");
+      if (!removable) {
+        return json(res, 400, { error: "Only an added Claude or Antigravity account can be removed here." });
       }
+      const turnRunning = [...runningTurnEngines.values()].some((engine) => engine.instanceId === instanceId);
       if (cfg.defaultModelSelection?.instanceId === instanceId || store.bots.some((bot) =>
         bot.modelSelection.instanceId === instanceId || store.tasks(bot.id).some((task) => task.modelSelection?.instanceId === instanceId)) ||
-        busyProviderSelections().some((selection) => selection.instanceId === instanceId)) {
+        busyProviderSelections().some((selection) => selection.instanceId === instanceId) || turnRunning) {
         return json(res, 409, { error: "Choose another account for the bots and default model using this account before removing it." });
       }
       providerConfigBusy = true;

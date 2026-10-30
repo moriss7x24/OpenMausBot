@@ -661,6 +661,8 @@ export interface InstanceInfo {
   cliCandidates?: string[];
   /** Server-owned Claude profile; a saved directory does not prove sign-in. */
   claudeAccount?: { configDir: string; signInCommand: string; signInShell: "powershell" | "sh"; isDefault: boolean };
+  /** Extra Antigravity logins share one model picker entry. The server assigns them. */
+  antigravityAccount?: { isDefault: boolean };
 }
 
 export type AppSettingsSection =
@@ -2090,12 +2092,12 @@ export async function persistTaskApproval(
   const { approvalMode, autoApprove, confirmFullAccess, acknowledgeLocalAuto, ...ordinary } = patch;
   const mode = approvalMode ?? (autoApprove === undefined ? undefined : autoApprove ? "auto" : "ask");
   if (mode === "full" && confirmFullAccess !== true) throw new Error("Confirm Full access for this thread first");
-  if ((mode === "full" || mode === "custom") && !bridge) throw new Error("This approval change requires the packaged desktop app");
-  if (mode && bridge) {
+  if (mode === "custom" && !bridge) throw new Error("This approval change requires the packaged desktop app");
+  if (mode === "custom" && bridge) {
     if (Object.keys(ordinary).length) await request(`/api/bots/${botId}/tasks/${threadId}`, { method: "PATCH", body: JSON.stringify(ordinary) });
     return bridge.setMode(botId, mode, { threadId, threadOnly: true, acknowledgeLocalAuto: acknowledgeLocalAuto === true });
   }
-  const result = await request(`/api/bots/${botId}/tasks/${threadId}`, { method: "PATCH", body: JSON.stringify({ ...ordinary, approvalMode, autoApprove, acknowledgeLocalAuto }) });
+  const result = await request(`/api/bots/${botId}/tasks/${threadId}`, { method: "PATCH", body: JSON.stringify({ ...ordinary, approvalMode, autoApprove, acknowledgeLocalAuto, ...(mode === "full" ? { confirmFullAccess: true } : {}) }) });
   return result.bot;
 }
 
@@ -2118,28 +2120,25 @@ export async function persistBotUpdate(
     confirmFullAccess,
     ...ordinaryPatch
   } = patch;
-  const trustedMode = approvalMode === "full" || approvalMode === "custom"
-    ? approvalMode
-    : null;
+  const trustedMode = approvalMode === "custom" ? approvalMode : null;
   const leavesCustom = approvalMode !== undefined &&
     approvalModeFor(currentBot ?? {}) === "custom" &&
     approvalMode !== "custom";
 
+  if (approvalMode === "full" && confirmFullAccess !== true) {
+    throw new Error("Confirm the Full access warning before enabling it");
+  }
   if (!trustedMode && !leavesCustom) {
     const result = await request(`/api/bots/${botId}`, {
       method: "PATCH",
-      // The Full confirmation is renderer-local and has already been removed
-      // above, including when a rapid later Ask/Auto choice was coalesced.
       body: JSON.stringify(
-        approvalMode === undefined ? ordinaryPatch : { ...ordinaryPatch, approvalMode },
+        approvalMode === undefined
+          ? ordinaryPatch
+          : { ...ordinaryPatch, approvalMode, ...(approvalMode === "full" ? { confirmFullAccess: true } : {}) },
       ),
       signal,
     });
     return result.bot;
-  }
-
-  if (approvalMode === "full" && confirmFullAccess !== true) {
-    throw new Error("Confirm the Full access warning before enabling it");
   }
   if (!trustedApprovals || approvalMode === undefined) {
     throw new Error("This approval-level change requires the packaged desktop app");

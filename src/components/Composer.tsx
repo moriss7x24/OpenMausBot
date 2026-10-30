@@ -468,7 +468,7 @@ export function Composer({
   };
   const setApprovalMode = (mode: ApprovalMode) => {
     if (!modeBot || modeBot.busy || mode === approvalModeFor(modeBot)) return;
-    if ((mode === "full" || mode === "custom") && !trustedThreadAccess) return;
+    if (mode === "custom" && !trustedThreadAccess) return;
     if (mode === "full") {
       setApprovalWarning({ mode, botId: modeBot.id, threadId: modeBot.threadId });
       return;
@@ -1126,7 +1126,7 @@ export function Composer({
         onConfirm={() => {
           const target = approvalWarning;
           setApprovalWarning(null);
-          if (target?.mode !== "full" || !trustedThreadAccess) return;
+          if (target?.mode !== "full") return;
           dispatch({ type: "updateTask", botId: target.botId, threadId: target.threadId,
             patch: { approvalMode: "full", confirmFullAccess: true } });
         }}
