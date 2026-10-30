@@ -234,6 +234,7 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_IMAGE_CAPABILITY;
     delete process.env.FAKE_ACP_GROK_VERSION;
     delete process.env.FAKE_ACP_DUMP_PROMPT;
+    delete process.env.FAKE_ACP_REPLY;
     recorder?.stop();
     await instance?.dispose();
     await removeTempDir(scratch);
@@ -292,6 +293,34 @@ describe("ACP turns (fake CLI)", () => {
     const done = recorder.events.at(-1)!;
     expect(done).toMatchObject({ type: "turn.completed", ok: true });
     expect(instance.adapter.hasSession("t-happy")).toBe(false);
+  });
+
+  it("drops a usage-limit reply so the host can switch accounts", async () => {
+    process.env.FAKE_ACP_REPLY = "Usage Limit Reached\nYou have reached your current quota for this period. Your limit will reset in 6 hours, 19 minutes.";
+    const driver = createAcpDriver({
+      ...SELECT_MODEL_SUPPORT,
+      driverKind: "quotaSwitchTest",
+      selectModel: undefined,
+      abandonAssistantText: (_threadId, text) => text.includes("Usage Limit Reached"),
+    });
+    instance = await driver.create({
+      instanceId: "quota-switch",
+      displayName: "Quota Switch",
+      environment: {},
+      enabled: true,
+      config: { cli: FAKE_CLI, fullAuto: false },
+    });
+    recorder = recordEvents(instance.adapter);
+    await instance.adapter.sendTurn({ threadId: "t-quota", text: "check inbox" });
+    await recorder.until((event) => event.type === "turn.retrying");
+    expect(recorder.events.some((event) => event.type === "item.completed")).toBe(false);
+    expect(recorder.events.some((event) => event.type === "turn.completed")).toBe(false);
+    expect(recorder.events.find((event) => event.type === "turn.retrying")).toMatchObject({
+      reason: "antigravity_quota",
+      attempt: 1,
+      delayMs: 0,
+    });
+    expect(instance.adapter.hasSession("t-quota")).toBe(false);
   });
 
   it("sends images as negotiated ACP content blocks without copying bytes into diagnostics", async () => {

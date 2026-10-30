@@ -31,6 +31,10 @@ import {
 import { resolveAntigravityReleaseAsset } from "./antigravity-release.ts";
 import { augmentedPath } from "../env-path.ts";
 import {
+  antigravityReplyNeedsAccountSwitch,
+  rememberAntigravityReplyNotice,
+} from "../antigravity-pool.ts";
+import {
   antigravityNoteAssistantText,
   antigravityNoteObserved,
   antigravityNoteUsage,
@@ -89,6 +93,11 @@ const support: AcpSupport = {
   noteUsage: antigravityNoteUsage,
   noteObserved: antigravityNoteObserved,
   noteAssistantDelta: antigravityNoteAssistantText,
+  abandonAssistantText: (threadId, text) => {
+    if (!antigravityReplyNeedsAccountSwitch(text)) return false;
+    rememberAntigravityReplyNotice(threadId, text);
+    return true;
+  },
   buildPromptText: (turn, ctx) => antigravityPromptText(turn, ctx),
   clientFileSystem: true,
   redactStderr: true,

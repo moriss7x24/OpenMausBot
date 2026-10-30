@@ -8,6 +8,7 @@
 //   FAKE_ACP_LOAD_NULL  return null for session/load so the resume cursor is
 //                       ignored and the driver falls through to session/new
 //   FAKE_ACP_MODE   happy (default) | image | empty-reply | exit-early | fail-after-text | hang | hang-initialize | no-auth | auth-required | permission | question
+//   FAKE_ACP_REPLY  when set, the happy-path assistant text is this string and no tool call is emitted
 //                   | interleave (message → tool → message → tool → message)
 //                   | no-session-config (reject session/set_mode + set_model
 //                     with -32601, i.e. an agent predating those methods)
@@ -330,6 +331,10 @@ function driveMcp(entry: McpEntry, calls: Array<{ name: string; args: (prev: str
 }
 
 function playTurn() {
+  if (process.env.FAKE_ACP_REPLY) {
+    out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: process.env.FAKE_ACP_REPLY } } } });
+    return;
+  }
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "hello from fake acp" } } } });
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call", toolCallId: "tc-1", title: "run", rawInput: { path: "/fixture/readme.md", password: "acp-input-secret" } } } });
   out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", status: "completed", rawOutput: { text: "fixture file content", api_key: "acp-output-secret" } } } });

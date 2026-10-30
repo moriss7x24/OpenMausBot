@@ -167,6 +167,10 @@ export interface AcpSupport {
   noteObserved?(threadId: string, chars: number): void;
   /** Assistant text as it streams, so a harness can count it and spot a dead session. */
   noteAssistantDelta?(threadId: string, delta: string, accumulated: string): void;
+  /** The finished assistant text is an account limit, not an answer. Return
+   * true to drop it and emit `turn.retrying` so the host can run the same
+   * turn on another account. A false result settles the turn normally. */
+  abandonAssistantText?(threadId: string, text: string): boolean;
   /** Rewrite a picker id (`omlx::model`) into the CLI-native id before spawn
    * and session/select. Local inject writers live here so the child sees a
    * model it already knows. */
@@ -1139,6 +1143,27 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               });
             }
             const reason = result?.stopReason;
+            if (reason !== "cancelled" && support.abandonAssistantText?.(threadId, state.text)) {
+              state.text = "";
+              state.settled = true;
+              if (interruptTimer) clearTimeout(interruptTimer);
+              for (const finish of asks.values()) finish("cancel", "system");
+              for (const pending of rpcPending.values()) {
+                if (pending.timer) clearTimeout(pending.timer);
+                pending.reject(new Error("turn settled"));
+              }
+              rpcPending.clear();
+              active.delete(threadId);
+              emit({
+                ...base(threadId, turnId),
+                type: "turn.retrying",
+                attempt: 1,
+                delayMs: 0,
+                reason: "antigravity_quota",
+              });
+              stop();
+              return;
+            }
             if (reason === "end_turn") settle(true, null);
             else if (reason === "cancelled") settle(true, "cancelled");
             else {

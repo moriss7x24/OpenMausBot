@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { antigravityAccountBlocked, antigravitySiblingKeepsModel, pickAntigravityAccount } from "./antigravity-pool.ts";
+import {
+  antigravityAccountBlocked,
+  antigravityReplyNeedsAccountSwitch,
+  antigravityReplySwitchExclude,
+  antigravitySiblingKeepsModel,
+  ANTIGRAVITY_QUOTA_COOLDOWN_MS,
+  antigravityUsageLimitCooldownMs,
+  clearAntigravityReplySwitch,
+  noteAntigravityQuota,
+  noteAntigravityQuotaFromText,
+  noteAntigravityReplySwitch,
+  pickAntigravityAccount,
+  resetAntigravityPoolForTests,
+} from "./antigravity-pool.ts";
 
 const accounts = [
   { instanceId: "antigravity", authenticated: true },
@@ -53,6 +66,77 @@ describe("antigravity account pool", () => {
     expect(antigravityAccountBlocked(new Error("RESOURCE_EXHAUSTED"))).toBe(true);
     expect(antigravityAccountBlocked(new Error("not logged in"))).toBe(true);
     expect(antigravityAccountBlocked(new Error("tool failed"))).toBe(false);
+  });
+
+  it("treats the usage-limit banner as a reason to leave that account", () => {
+    const banner = "Usage Limit Reached\nYou have reached your current quota for this period. Your limit will reset in 6 hours, 19 minutes.";
+    expect(antigravityReplyNeedsAccountSwitch(banner)).toBe(true);
+    expect(antigravityReplyNeedsAccountSwitch("Verify your account to continue.")).toBe(true);
+    expect(antigravityReplyNeedsAccountSwitch("the quota looks fine")).toBe(false);
+    expect(antigravityReplyNeedsAccountSwitch(`${banner}\n${"x".repeat(800)}`)).toBe(false);
+    expect(antigravityUsageLimitCooldownMs(banner)).toBe((6 * 60 + 19) * 60 * 1000);
+    expect(antigravityUsageLimitCooldownMs("Your limit will reset in 4 hours, 57 minutes.")).toBe((4 * 60 + 57) * 60 * 1000);
+    expect(antigravityUsageLimitCooldownMs("limit reset in 30 minutes")).toBe(30 * 60 * 1000);
+    expect(antigravityUsageLimitCooldownMs("quota exceeded")).toBeNull();
+    resetAntigravityPoolForTests();
+    noteAntigravityReplySwitch("thread-1", "antigravity", banner, 1_000);
+    expect(antigravityReplySwitchExclude("thread-1").has("antigravity")).toBe(true);
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      exclude: antigravityReplySwitchExclude("thread-1"),
+      now: 1_000,
+    })).toEqual({ instanceId: "antigravity-b", reason: "spread" });
+    resetAntigravityPoolForTests();
+  });
+
+  it("does not park an account for hours after a verification check", () => {
+    resetAntigravityPoolForTests();
+    noteAntigravityQuota("antigravity", 1_000, 6 * 60 * 60 * 1000);
+    noteAntigravityReplySwitch("thread-2", "antigravity-b", "Verify your account to continue.", 1_000);
+    clearAntigravityReplySwitch("thread-2");
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      now: 2_000,
+    })).toEqual({ instanceId: "antigravity-b", reason: "spread" });
+    resetAntigravityPoolForTests();
+  });
+
+  it("holds a quota account until the reset time printed in the message", () => {
+    const banner = "Usage Limit Reached\nYou have reached your current quota for this period. Your limit will reset in 4 hours, 57 minutes.";
+    const resetMs = (4 * 60 + 57) * 60 * 1000;
+    resetAntigravityPoolForTests();
+    noteAntigravityQuotaFromText("antigravity", banner, 1_000);
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      now: 1_000 + resetMs - 1,
+    })).toEqual({ instanceId: "antigravity-b", reason: "spread" });
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      now: 1_000 + resetMs,
+    })).toEqual({ instanceId: "antigravity", reason: "sticky" });
+    resetAntigravityPoolForTests();
+    noteAntigravityQuotaFromText("antigravity", "quota exceeded", 1_000);
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      now: 1_000 + ANTIGRAVITY_QUOTA_COOLDOWN_MS - 1,
+    })).toEqual({ instanceId: "antigravity-b", reason: "spread" });
+    expect(pickAntigravityAccount({
+      accounts,
+      preferredId: "antigravity",
+      preferredCanResume: true,
+      now: 1_000 + ANTIGRAVITY_QUOTA_COOLDOWN_MS,
+    })).toEqual({ instanceId: "antigravity", reason: "sticky" });
+    resetAntigravityPoolForTests();
   });
 
   it("keeps the selected model when another signed-in account runs the turn", () => {
